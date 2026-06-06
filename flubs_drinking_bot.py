@@ -23,9 +23,11 @@ Roster:
   !commands   -> help
 
 Setup:
-  1) pip install -U discord.py
+  1) pip install -U discord.py python-dotenv
   2) Developer Portal -> Bot tab -> enable "MESSAGE CONTENT INTENT"
-  3) (PowerShell)  $env:DISCORD_TOKEN="your-token";  & python flubs_drinking_bot.py
+  3) Put your token in a file named  .env  next to this script:
+         DISCORD_TOKEN=your-token-here
+     (or set it as an env var). Then:  python flubs_drinking_bot.py
   Play responsibly — swap in water/soda for any sip and it all still works.
 """
 
@@ -36,8 +38,13 @@ import random
 import discord
 from discord.ext import commands
 
-from dotenv import load_dotenv
-load_dotenv()
+# Load DISCORD_TOKEN from a .env file if python-dotenv is installed.
+# (pip install python-dotenv)  Falls back to the system env var otherwise.
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 # ---------------------------------------------------------------------------
 # Config
@@ -46,6 +53,13 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 PREFIX = "!"
 
 roster = [
+    "Colin",
+    "Spender",
+    "Jake",
+    "Kaden",
+    "Wyatt",
+    "Nick",
+    "Paul",
 ]
 
 TEAM_NAMES = ["🟦 THE BOUNDLESS", "🟪 THE LIVE WIRES"]
@@ -62,14 +76,18 @@ PUNISHMENTS = [
 ]
 
 RULES = [
-    "**Waterfall** — everyone starts drinking at once; you can't stop until the person before you stops.",
-    "**Thumb Master** — last person to put a thumb on the table drinks.",
-    "**Categories** — pick a category, go around naming things; first to blank or repeat drinks.",
-    "**No Names** — say anyone's real name and you drink.",
-    "**Wrong Hand** — drink with your non-dominant hand or it's a penalty sip.",
-    "**Rhyme Time** — go around rhyming a word; whoever breaks the chain drinks.",
-    "**Never Have I Ever** — quick one-round face-off, loser drinks.",
-    "**Silent Round** — first person to talk before the result drinks.",
+    "🔇 **No callouts** — stay silent the whole match or drink.",
+    "🔫 **Hipfire only** — no aiming down sights or drink.",
+    "🚶 **Walk only** — no sprinting the entire match or drink.",
+    "🙅 **No real names** — in-game names only; say a real name and you drink.",
+    "💣 **No grenades or abilities** this match or drink.",
+    "🐢 **No crouching** the whole match or drink.",
+    "🔪 **First blood drinks** — whoever dies first this match takes the stake too.",
+    "🤐 **Don't say 'kill'** — say 'tag' instead, or drink.",
+    "↩️ **No early reloads** — empty the mag before reloading or drink.",
+    "🎤 **Trash talk in an accent only** — break character and you drink.",
+    "🧍 **No camping** — keep moving; group calls it, you drink.",
+    "🎯 **One life, one drink** — first death on each team drinks immediately.",
 ]
 
 BYE = "BYE"
