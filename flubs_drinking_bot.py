@@ -2,31 +2,35 @@
 FLUBS Drinking Bot 🍻
 A tiny Discord bot for game-night chaos.
 
-Features:
-  !drink      -> picks a random player to drink (with a random punishment)
+Match / casual commands:
+  !drink      -> random player drinks (random punishment)
   !roulette   -> one survivor, everyone else drinks
-  !teams      -> shuffles everyone into THE BOUNDLESS vs THE LIVE WIRES
+  !teams      -> shuffle into THE BOUNDLESS vs THE LIVE WIRES
   !match      -> random 1v1 matchups (odd player gets a bye + drinks)
-  !round      -> a full round: random matchup + random rule + loser's stake
-  !rule       -> drops a random drinking-game rule on the table
+  !round      -> a full round: random matchup + rule + loser's stake
+  !rule       -> drops a random drinking-game rule
+
+Tournament commands:
+  !tournament -> start a single-elimination bracket from the roster
+  !bracket    -> reprint the current bracket
+  !win NAME   -> report a match winner; loser drinks the stake; bracket advances
+  !tend       -> end / cancel the current tournament
+
+Roster:
   !roster     -> show current players
   !add NAME   -> add a player  (tip: !add @SomeUser pings the real person)
   !remove NAME-> remove a player
-  !commands   -> this help
+  !commands   -> help
 
 Setup:
   1) pip install -U discord.py
-  2) Create a bot at https://discord.com/developers/applications
-     - Bot tab -> enable "MESSAGE CONTENT INTENT"
-     - copy the token
-  3) export DISCORD_TOKEN="your-token-here"   (Windows: set DISCORD_TOKEN=...)
-  4) python flubs_drinking_bot.py
-  5) Invite it with the "bot" scope + "Send Messages" permission.
-
-Play responsibly — swap in water/soda for any sip and the game works exactly the same.
+  2) Developer Portal -> Bot tab -> enable "MESSAGE CONTENT INTENT"
+  3) (PowerShell)  $env:DISCORD_TOKEN="your-token";  & python flubs_drinking_bot.py
+  Play responsibly — swap in water/soda for any sip and it all still works.
 """
 
 import os
+import math
 import random
 
 import discord
@@ -41,14 +45,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 PREFIX = "!"
 
-# Roster seeded straight from the lobby screenshot. Edit live with !add / !remove.
 roster = [
-    "Verticalphase",
-    "BigSpender",
-    "GrandGlobe",
-    "BiggusIckus",
-    "ShadowDivider",
-    "PromptPro",
 ]
 
 TEAM_NAMES = ["🟦 THE BOUNDLESS", "🟪 THE LIVE WIRES"]
@@ -62,20 +59,20 @@ PUNISHMENTS = [
     "downs a shot 💀",
     "drinks AND picks a buddy to drink with them",
     "waterfalls the whole table 🌊",
-    "gets lucky — sits this one out 😇",
 ]
 
 RULES = [
     "**Waterfall** — everyone starts drinking at once; you can't stop until the person before you stops.",
     "**Thumb Master** — last person to put a thumb on the table drinks.",
     "**Categories** — pick a category, go around naming things; first to blank or repeat drinks.",
-    "**No Names** — say anyone's real name for the next round and you drink.",
+    "**No Names** — say anyone's real name and you drink.",
     "**Wrong Hand** — drink with your non-dominant hand or it's a penalty sip.",
     "**Rhyme Time** — go around rhyming a word; whoever breaks the chain drinks.",
-    "**Never Have I Ever** — losers run one quick round.",
-    "**Heaven** — random callout: last person to raise a hand drinks.",
-    "**Silent Round** — first person to talk before the next match drinks.",
+    "**Never Have I Ever** — quick one-round face-off, loser drinks.",
+    "**Silent Round** — first person to talk before the result drinks.",
 ]
+
+BYE = "BYE"
 
 # ---------------------------------------------------------------------------
 # Bot
@@ -94,14 +91,15 @@ def _need_players(min_count=1):
     return len(roster) >= min_count
 
 
-# ---- random victim --------------------------------------------------------
+# ===========================================================================
+# CASUAL / MATCH COMMANDS
+# ===========================================================================
 @bot.command(name="drink", aliases=["victim", "who"])
 async def drink(ctx):
     if not _need_players():
         await ctx.send("Roster's empty — add someone with `!add Name`.")
         return
-    victim = random.choice(roster)
-    await ctx.send(f"🍻 **{victim}** {random.choice(PUNISHMENTS)}!")
+    await ctx.send(f"🍻 **{random.choice(roster)}** {random.choice(PUNISHMENTS)}!")
 
 
 @bot.command(name="roulette")
@@ -118,7 +116,6 @@ async def roulette(ctx):
     )
 
 
-# ---- match / team randomizers ---------------------------------------------
 @bot.command(name="teams", aliases=["shuffle"])
 async def teams(ctx):
     if not _need_players(2):
@@ -127,9 +124,9 @@ async def teams(ctx):
     pool = roster[:]
     random.shuffle(pool)
     mid = (len(pool) + 1) // 2
-    team_a, team_b = pool[:mid], pool[mid:]
-    msg = f"**{TEAM_NAMES[0]}**\n" + "\n".join(f"• {p}" for p in team_a)
-    msg += f"\n\n**{TEAM_NAMES[1]}**\n" + "\n".join(f"• {p}" for p in team_b)
+    a, b = pool[:mid], pool[mid:]
+    msg = f"**{TEAM_NAMES[0]}**\n" + "\n".join(f"• {p}" for p in a)
+    msg += f"\n\n**{TEAM_NAMES[1]}**\n" + "\n".join(f"• {p}" for p in b)
     await ctx.send(msg)
 
 
@@ -143,7 +140,7 @@ async def match(ctx):
     lines = []
     while len(pool) >= 2:
         lines.append(f"⚔️ **{pool.pop()}** vs **{pool.pop()}**")
-    if pool:  # odd one out
+    if pool:
         lines.append(f"🪑 **{pool[0]}** has a bye — drinks while they wait.")
     await ctx.send("\n".join(lines))
 
@@ -166,7 +163,232 @@ async def rule(ctx):
     await ctx.send("📜 " + random.choice(RULES))
 
 
-# ---- roster management ----------------------------------------------------
+# ===========================================================================
+# TOURNAMENT
+# ===========================================================================
+tournament = {
+    "active": False,
+    "cols": [],     # cols[0] = seeds (incl BYE); later cols = winners or "?"
+    "cur": 0,       # index of the round currently being played (children col)
+    "matches": {},  # match_id -> {a, b, stake, rule, i}
+    "champion": None,
+}
+
+NAME_W = 14   # bracket name field width
+GAP = 5       # space for connectors between columns
+
+
+def _next_pow2(n):
+    return 1 << (n - 1).bit_length()
+
+
+def _round_label(slot_count):
+    return {2: "FINAL", 4: "SEMIFINALS", 8: "QUARTERFINALS",
+            16: "ROUND OF 16", 32: "ROUND OF 32"}.get(slot_count, f"ROUND ({slot_count})")
+
+
+def _build_round(cur):
+    """Create matches for the children column `cur`, auto-advancing byes."""
+    children = tournament["cols"][cur]
+    parents = tournament["cols"][cur + 1]
+    matches = {}
+    mi = 1
+    for i in range(len(parents)):
+        a, b = children[2 * i], children[2 * i + 1]
+        if a == BYE and b != BYE:
+            parents[i] = b
+        elif b == BYE and a != BYE:
+            parents[i] = a
+        elif a == BYE and b == BYE:
+            parents[i] = BYE
+        else:
+            mid = f"M{mi}"
+            mi += 1
+            matches[mid] = {
+                "a": a, "b": b, "i": i,
+                "stake": random.choice(PUNISHMENTS),
+                "rule": random.choice(RULES),
+            }
+    tournament["matches"] = matches
+
+
+def _render_bracket(cols):
+    """Draw a single-elimination bracket as monospace ASCII."""
+    def fmt(s):
+        s = "(bye)" if s == BYE else s
+        return s[:NAME_W].ljust(NAME_W)
+
+    ncols = len(cols)
+    size = len(cols[0])
+    height = 2 * size - 1
+    width = ncols * (NAME_W + GAP)
+    grid = [[" "] * width for _ in range(height)]
+
+    def put(r, c, text):
+        for k, ch in enumerate(text):
+            if 0 <= r < height and 0 <= c + k < width:
+                grid[r][c + k] = ch
+
+    def row_of(col, i):
+        return (2 ** col) * (2 * i + 1) - 1
+
+    # labels
+    for c in range(ncols):
+        for i in range(len(cols[c])):
+            put(row_of(c, i), c * (NAME_W + GAP), fmt(cols[c][i]))
+
+    # connectors
+    for c in range(ncols - 1):
+        for i in range(len(cols[c + 1])):
+            r_top, r_bot, r_par = row_of(c, 2 * i), row_of(c, 2 * i + 1), row_of(c + 1, i)
+            x_end = c * (NAME_W + GAP) + NAME_W
+            x_bar = x_end + 1
+            x_par = (c + 1) * (NAME_W + GAP)
+            put(r_top, x_end, "─"); put(r_top, x_bar, "┐")
+            put(r_bot, x_end, "─"); put(r_bot, x_bar, "┘")
+            for rr in range(r_top + 1, r_bot):
+                if grid[rr][x_bar] == " ":
+                    grid[rr][x_bar] = "│"
+            put(r_par, x_bar, "├")
+            for xx in range(x_bar + 1, x_par):
+                put(r_par, xx, "─")
+
+    return "\n".join("".join(row).rstrip() for row in grid)
+
+
+def _matches_block():
+    lines = []
+    for mid, m in tournament["matches"].items():
+        lines.append(
+            f"**{mid}** — {m['a']} vs {m['b']}\n"
+            f"   📜 {m['rule']}\n"
+            f"   💀 Loser {m['stake']}."
+        )
+    return "\n".join(lines)
+
+
+async def _show_bracket(ctx):
+    art = _render_bracket(tournament["cols"])
+    if len(art) > 1900:
+        await ctx.send("⚠️ Bracket's too wide to draw cleanly — try fewer players.")
+    else:
+        await ctx.send(f"```\n{art}\n```")
+    block = _matches_block()
+    if block:
+        await ctx.send("**Play these matches, then report with `!win NAME`:**\n" + block)
+
+
+@bot.command(name="tournament", aliases=["tourney", "cup"])
+async def tournament_start(ctx):
+    if tournament["active"]:
+        await ctx.send("A tournament's already running. Use `!bracket` to see it or `!tend` to cancel.")
+        return
+    if not _need_players(2):
+        await ctx.send("Need at least 2 players. Add some with `!add Name`.")
+        return
+
+    reals = roster[:]
+    random.shuffle(reals)
+    n = len(reals)
+    size = _next_pow2(n)
+    byes = size - n
+
+    # seed: at most one BYE per match; byes land in the first `byes` matches
+    seeds = []
+    it = iter(reals)
+    for m in range(size // 2):
+        seeds.append(next(it))                       # slot a
+        seeds.append(BYE if m < byes else next(it))  # slot b
+
+    ncols = int(math.log2(size)) + 1
+    cols = [["?"] * (size >> c) for c in range(ncols)]
+    cols[0] = seeds
+
+    tournament.update(active=True, cols=cols, cur=0, matches={}, champion=None)
+    _build_round(0)
+
+    bye_txt = f" ({byes} bye{'s' if byes != 1 else ''})" if byes else ""
+    plural = "s" if n != 1 else ""
+    await ctx.send(
+        f"🏆 **THE FLUBS CUP** — {n} player{plural}{bye_txt}\n"
+        f"**{_round_label(size)}** begins!"
+    )
+    await _show_bracket(ctx)
+
+
+@bot.command(name="bracket")
+async def bracket_show(ctx):
+    if not tournament["active"]:
+        await ctx.send("No tournament running. Start one with `!tournament`.")
+        return
+    await _show_bracket(ctx)
+
+
+@bot.command(name="win", aliases=["winner", "advance"])
+async def win(ctx, *, name: str):
+    if not tournament["active"]:
+        await ctx.send("No tournament running. Start one with `!tournament`.")
+        return
+
+    low = name.strip().lower()
+    found = None
+    for mid, m in tournament["matches"].items():
+        for who in (m["a"], m["b"]):
+            if who.lower() == low or who.lower().startswith(low):
+                found = (mid, m, who)
+                break
+        if found:
+            break
+
+    if not found:
+        live = ", ".join(f"{m['a']} vs {m['b']}" for m in tournament["matches"].values())
+        await ctx.send(f"Couldn't find **{name}** in an open match.\nOpen now: {live}")
+        return
+
+    mid, m, winner = found
+    loser = m["b"] if winner == m["a"] else m["a"]
+    cur = tournament["cur"]
+    tournament["cols"][cur + 1][m["i"]] = winner
+    del tournament["matches"][mid]
+
+    await ctx.send(f"✅ **{winner}** beats **{loser}** — {loser} {m['stake']}! 🍺")
+
+    if tournament["matches"]:
+        await _show_bracket(ctx)
+        return
+
+    # round complete -> advance
+    tournament["cur"] += 1
+    cur = tournament["cur"]
+    if len(tournament["cols"][cur]) == 1:
+        champ = tournament["cols"][cur][0]
+        tournament["champion"] = champ
+        tournament["active"] = False
+        art = _render_bracket(tournament["cols"])
+        await ctx.send(f"```\n{art}\n```")
+        await ctx.send(
+            f"👑 **{champ}** WINS THE FLUBS CUP! 🏆\n"
+            "Everyone else: raise a glass to the champ. 🍻"
+        )
+        return
+
+    _build_round(cur)
+    await ctx.send(f"➡️ **{_round_label(len(tournament['cols'][cur]))}**")
+    await _show_bracket(ctx)
+
+
+@bot.command(name="tend", aliases=["cancel"])
+async def tournament_end(ctx):
+    if not tournament["active"]:
+        await ctx.send("No tournament to cancel.")
+        return
+    tournament.update(active=False, cols=[], cur=0, matches={}, champion=None)
+    await ctx.send("🛑 Tournament cancelled.")
+
+
+# ===========================================================================
+# ROSTER
+# ===========================================================================
 @bot.command(name="add")
 async def add(ctx, *, name: str):
     name = name.strip()
@@ -199,13 +421,12 @@ async def show_roster(ctx):
 async def help_cmd(ctx):
     await ctx.send(
         "**FLUBS Drinking Bot** 🍻\n"
-        "`!drink` — random victim drinks\n"
-        "`!roulette` — one survivor, rest drink\n"
-        "`!teams` — shuffle into 2 teams\n"
-        "`!match` — random 1v1s\n"
-        "`!round` — matchup + rule + stake\n"
-        "`!rule` — random rule\n"
-        "`!roster` / `!add Name` / `!remove Name`"
+        "__Casual__\n"
+        "`!drink` · `!roulette` · `!teams` · `!match` · `!round` · `!rule`\n"
+        "__Tournament__\n"
+        "`!tournament` start · `!win NAME` report result · `!bracket` reprint · `!tend` cancel\n"
+        "__Roster__\n"
+        "`!roster` · `!add Name` · `!remove Name`"
     )
 
 
