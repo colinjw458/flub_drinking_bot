@@ -60,6 +60,8 @@ roster = [
     "Wyatt",
     "Nick",
     "Paul",
+    "Garrett",
+    "Ayden",
 ]
 
 TEAM_NAMES = ["🟦 THE BOUNDLESS", "🟪 THE LIVE WIRES"]
