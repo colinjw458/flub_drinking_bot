@@ -800,10 +800,22 @@ def register_poker(bot):
     async def allin(ctx):
         await _do(ctx, "allin")
 
+    @bot.command(name="reset", aliases=["resethand", "abort"])
+    async def reset_hand(ctx):
+        """Abort a stuck hand, refund chips, keep everyone seated."""
+        if not table.in_hand:
+            await ctx.send("No hand in progress. (`!endpoker` clears the whole table.)")
+            return
+        for p in table.players:
+            table.stacks[p] += table.paid.get(p, 0)   # refund this hand's commitments
+        table.in_hand = False
+        table._clear_hand()
+        await ctx.send("♻️ Hand reset — chips refunded, everyone still seated. `!deal` to go again.")
+
     @bot.command(name="endpoker", aliases=["pend"])
     async def endpoker(ctx):
         table.reset_all()
-        await ctx.send("🛑 Poker table cleared.")
+        await ctx.send("🛑 Poker table cleared — seats emptied.")
 
     return table
 

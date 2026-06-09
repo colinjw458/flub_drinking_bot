@@ -446,15 +446,19 @@ async def help_cmd(ctx):
         "__Tournament__\n"
         "`!tournament` start · `!win NAME` report result · `!bracket` reprint · `!tend` cancel\n"
         "__Hold'em__ 🃏 (drinking, pot-limit)\n"
-        "`!sit` · `!deal` · `!check`/`!call`/`!bet 1/8`/`!raise 1/16`/`!pot`/`!allin`/`!fold` · `!cards` · `!table`\n"
+        "`!sit` · `!deal` · `!check`/`!call`/`!bet 1/8`/`!raise 1/16`/`!pot`/`!allin`/`!fold` · `!cards` · `!table` · `!drinkmode`\n"
+        "__Liar's Poker__ 🪙\n"
+        "`!liars` open · `!lpjoin` · `!lpgo` deal · `!bid 3 7` · `!liar` challenge · `!serial`\n"
         "__Roster__\n"
         "`!roster` · `!add Name` · `!remove Name`"
     )
 
 
-# Drinking pot-limit Hold'em lives in poker.py
+# Drinking pot-limit Hold'em + Liar's Poker live in their own modules
 from poker import register_poker
+from liars_poker import register_liars
 register_poker(bot)
+register_liars(bot)
 
 
 if __name__ == "__main__":
