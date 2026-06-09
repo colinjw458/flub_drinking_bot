@@ -445,9 +445,16 @@ async def help_cmd(ctx):
         "`!drink` · `!roulette` · `!teams` · `!match` · `!round` · `!rule`\n"
         "__Tournament__\n"
         "`!tournament` start · `!win NAME` report result · `!bracket` reprint · `!tend` cancel\n"
+        "__Hold'em__ 🃏 (drinking, pot-limit)\n"
+        "`!sit` · `!deal` · `!check`/`!call`/`!bet 1/8`/`!raise 1/16`/`!pot`/`!allin`/`!fold` · `!cards` · `!table`\n"
         "__Roster__\n"
         "`!roster` · `!add Name` · `!remove Name`"
     )
+
+
+# Drinking pot-limit Hold'em lives in poker.py
+from poker import register_poker
+register_poker(bot)
 
 
 if __name__ == "__main__":
