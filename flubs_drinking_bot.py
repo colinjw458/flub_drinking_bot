@@ -691,7 +691,13 @@ async def help_cmd(ctx):
         "__Casual__\n"
         "`!drink` · `!roulette` · `!teams` · `!match` · `!round` · `!rule`\n"
         "__Tournament__\n"
-        "`!tournament` · `!bracket` · `!win NAME` · `!tend`\n"
+        "`!tournament` start · `!win NAME` report result · `!bracket` reprint · `!tend` cancel\n"
+        "__Hold'em__ 🃏 (drinking, pot-limit)\n"
+        "`!sit` · `!deal` · `!check`/`!call`/`!bet 1/8`/`!raise 1/16`/`!pot`/`!allin`/`!fold` · `!cards` · `!table` · `!drinkmode`\n"
+        "__Liar's Poker__ 🪙\n"
+        "`!liars` open · `!lpjoin` · `!lpgo` deal · `!bid 3 7` · `!liar` challenge · `!serial`\n"
+        "__Roster__\n"
+        "`!roster` · `!add Name` · `!remove Name`"
         "__Voice Channel__\n"
         "`!roster` shows active players\n"
         "__Overrides (persistent)__\n"
@@ -699,6 +705,13 @@ async def help_cmd(ctx):
         "__Steam__\n"
         "`!steam STEAMID64` · `!unsteam` · `!shared`"
     )
+
+
+# Drinking pot-limit Hold'em + Liar's Poker live in their own modules
+from poker import register_poker
+from liars_poker import register_liars
+register_poker(bot)
+register_liars(bot)
 
 
 if __name__ == "__main__":
