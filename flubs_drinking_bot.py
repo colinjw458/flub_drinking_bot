@@ -34,6 +34,9 @@ Setup:
 import os
 import math
 import random
+import sqlite3
+import json
+import aiohttp
 
 import discord
 from discord.ext import commands
@@ -49,18 +52,66 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
+
+#
+#   1. Install the new dependency: `pip install aiohttp`
+#   2. Add the Steam API key to .env as STEAM_API_KEY=key-here (get one from Steam API)
+#   3. Ensure the Discord bot has voice_states intent enabled (already configured)
+#
+
+
 TOKEN = os.getenv("DISCORD_TOKEN")
 PREFIX = "!"
+STEAM_API_KEY = os.getenv("STEAM_API_KEY")
+DB_FILE = "flubs_bot.db"
 
-roster = [
-    "Colin",
-    "Spender",
-    "Jake",
-    "Kaden",
-    "Wyatt",
-    "Nick",
-    "Paul",
-]
+def init_db():
+    with sqlite3.connect(DB_FILE) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS roster_overrides (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                action TEXT NOT NULL CHECK(action IN ('add','remove'))
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS steam_ids (
+                discord_user_id INTEGER PRIMARY KEY,
+                steam_id TEXT NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS game_names (
+                appid INTEGER PRIMARY KEY,
+                name TEXT NOT NULL
+            )
+        """)
+        conn.commit()
+
+def load_overrides():
+    always_add = []
+    always_remove = []
+    with sqlite3.connect(DB_FILE) as conn:
+        rows = conn.execute("SELECT name, action FROM roster_overrides").fetchall()
+        for name, action in rows:
+            if action == 'add':
+                always_add.append(name)
+            else:
+                always_remove.append(name)
+    return always_add, always_remove
+
+def save_override(name, action):
+    with sqlite3.connect(DB_FILE) as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO roster_overrides (name, action) VALUES (?, ?)",
+            (name, action)
+        )
+        conn.commit()
+
+def remove_override(name):
+    with sqlite3.connect(DB_FILE) as conn:
+        conn.execute("DELETE FROM roster_overrides WHERE name = ?", (name,))
+        conn.commit()
 
 TEAM_NAMES = ["🟦 THE BOUNDLESS", "🟪 THE LIVE WIRES"]
 
@@ -97,36 +148,85 @@ BYE = "BYE"
 # ---------------------------------------------------------------------------
 intents = discord.Intents.default()
 intents.message_content = True
+intents.members = True
+intents.voice_states = True
 bot = commands.Bot(command_prefix=PREFIX, intents=intents, help_command=None)
+
+def get_roster(ctx, extra_str: str = None):
+    """
+    Return a list of player display names from the caller's voice channel.
+    - Filters out any name containing 'phone' (case-insensitive).
+    - Applies persistent overrides from SQLite (always add/remove).
+    - Processes extra_str for inline +/- adjustments with comma lists.
+    """
+    if not ctx.author.voice or not ctx.author.voice.channel:
+        return []
+
+    channel = ctx.author.voice.channel
+    players = [member.display_name for member in channel.members]
+    players = [p for p in players if "phone" not in p.lower()]
+
+    # Apply persistent overrides
+    always_add, always_remove = load_overrides()
+    for name in always_remove:
+        if name in players:
+            players.remove(name)
+    for name in always_add:
+        if name not in players:
+            players.append(name)
+
+    # Process extra string (+ and -)
+    if extra_str:
+        parts = extra_str.split()
+        i = 0
+        while i < len(parts):
+            token = parts[i]
+            if token.startswith("+"):
+                # +name1,name2,name3
+                names_str = token[1:]
+                if names_str:
+                    for name in names_str.split(","):
+                        name = name.strip()
+                        if name and name not in players:
+                            players.append(name)
+            elif token.startswith("-"):
+                # -name1,name2,name3
+                names_str = token[1:]
+                if names_str:
+                    for name in names_str.split(","):
+                        name = name.strip()
+                        if name in players:
+                            players.remove(name)
+            i += 1
+
+    return players
 
 
 @bot.event
 async def on_ready():
-    print(f"Logged in as {bot.user} — {len(roster)} players loaded.")
-
-
-def _need_players(min_count=1):
-    return len(roster) >= min_count
+    print(f"Logged in as {bot.user}")
 
 
 # ===========================================================================
 # CASUAL / MATCH COMMANDS
 # ===========================================================================
 @bot.command(name="drink", aliases=["victim", "who"])
-async def drink(ctx):
-    if not _need_players():
-        await ctx.send("Roster's empty — add someone with `!add Name`.")
+async def drink(ctx, *, extra: str = ""):
+    players = get_roster(ctx, extra)
+    if not players:
+        await ctx.send("You're not in a voice channel, or it's empty after filtering.")
         return
-    await ctx.send(f"🍻 **{random.choice(roster)}** {random.choice(PUNISHMENTS)}!")
+    await ctx.send(f"🍻 **{random.choice(players)}** {random.choice(PUNISHMENTS)}!")
 
 
 @bot.command(name="roulette")
-async def roulette(ctx):
-    if not _need_players(2):
+async def roulette(ctx, *, extra: str = ""):
+    players = get_roster(ctx, extra)
+    if len(players) < 2:
         await ctx.send("Need at least 2 players for roulette.")
         return
-    survivor = random.choice(roster)
-    drinkers = [p for p in roster if p != survivor]
+    survivor = random.choice(players)
+    drinkers = [p for p in players if p != survivor]
     await ctx.send(
         "🔫 **DRINKING ROULETTE**\n"
         f"😇 Safe: **{survivor}**\n"
@@ -135,11 +235,12 @@ async def roulette(ctx):
 
 
 @bot.command(name="teams", aliases=["shuffle"])
-async def teams(ctx):
-    if not _need_players(2):
+async def teams(ctx, *, extra: str = ""):
+    players = get_roster(ctx, extra)
+    if len(players) < 2:
         await ctx.send("Need at least 2 players to make teams.")
         return
-    pool = roster[:]
+    pool = players[:]
     random.shuffle(pool)
     mid = (len(pool) + 1) // 2
     a, b = pool[:mid], pool[mid:]
@@ -149,11 +250,12 @@ async def teams(ctx):
 
 
 @bot.command(name="match", aliases=["matches", "1v1"])
-async def match(ctx):
-    if not _need_players(2):
+async def match(ctx, *, extra: str = ""):
+    players = get_roster(ctx, extra)
+    if len(players) < 2:
         await ctx.send("Need at least 2 players for matchups.")
         return
-    pool = roster[:]
+    pool = players[:]
     random.shuffle(pool)
     lines = []
     while len(pool) >= 2:
@@ -164,11 +266,12 @@ async def match(ctx):
 
 
 @bot.command(name="round")
-async def round_(ctx):
-    if not _need_players(2):
+async def round_(ctx, *, extra: str = ""):
+    players = get_roster(ctx, extra)
+    if len(players) < 2:
         await ctx.send("Need at least 2 players for a round.")
         return
-    a, b = random.sample(roster, 2)
+    a, b = random.sample(players, 2)
     await ctx.send(
         f"🎮 **ROUND** — {a} vs {b}\n"
         f"📜 {random.choice(RULES)}\n"
@@ -297,15 +400,17 @@ async def _show_bracket(ctx):
 
 
 @bot.command(name="tournament", aliases=["tourney", "cup"])
-async def tournament_start(ctx):
+async def tournament_start(ctx, *, extra: str = ""):
     if tournament["active"]:
         await ctx.send("A tournament's already running. Use `!bracket` to see it or `!tend` to cancel.")
         return
-    if not _need_players(2):
-        await ctx.send("Need at least 2 players. Add some with `!add Name`.")
+    
+    players = get_roster(ctx, extra)
+    if len(players) < 2:
+        await ctx.send("Need at least 2 players.")
         return
 
-    reals = roster[:]
+    reals = players[:]
     random.shuffle(reals)
     n = len(reals)
     size = _next_pow2(n)
@@ -405,34 +510,178 @@ async def tournament_end(ctx):
 
 
 # ===========================================================================
-# ROSTER
+# ROSTER & OVERRIDES
 # ===========================================================================
-@bot.command(name="add")
-async def add(ctx, *, name: str):
-    name = name.strip()
-    if name in roster:
-        await ctx.send(f"**{name}** is already in the lobby.")
-        return
-    roster.append(name)
-    await ctx.send(f"✅ Added **{name}**. ({len(roster)} players)")
-
-
-@bot.command(name="remove", aliases=["kick"])
-async def remove(ctx, *, name: str):
-    name = name.strip()
-    if name not in roster:
-        await ctx.send(f"Couldn't find **{name}** in the lobby.")
-        return
-    roster.remove(name)
-    await ctx.send(f"❌ Removed **{name}**. ({len(roster)} players)")
-
-
 @bot.command(name="roster", aliases=["players", "list"])
-async def show_roster(ctx):
-    if not roster:
-        await ctx.send("No players yet — add some with `!add Name`.")
+async def show_roster(ctx, *, extra: str = ""):
+    players = get_roster(ctx, extra)
+    if not players:
+        await ctx.send("No active players (voice channel + filters).")
         return
-    await ctx.send("**Lobby:**\n" + "\n".join(f"• {p}" for p in roster))
+    msg = f"**Active players ({len(players)}):**\n" + "\n".join(f"• {p}" for p in players)
+    await ctx.send(msg)
+
+
+@bot.command(name="steam")
+async def link_steam(ctx, steam_id: str):
+    if not steam_id.isdigit():
+        await ctx.send("Please provide a valid SteamID64 (a long number).")
+        return
+    with sqlite3.connect(DB_FILE) as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO steam_ids (discord_user_id, steam_id) VALUES (?, ?)",
+            (ctx.author.id, steam_id)
+        )
+        conn.commit()
+    await ctx.send(f"✅ Steam account linked: {steam_id}")
+
+
+@bot.command(name="unsteam")
+async def unlink_steam(ctx):
+    with sqlite3.connect(DB_FILE) as conn:
+        conn.execute("DELETE FROM steam_ids WHERE discord_user_id = ?", (ctx.author.id,))
+        conn.commit()
+    await ctx.send("🔁 Steam account unlinked.")
+
+
+async def get_owned_games(steam_id):
+    """Return a set of appids or None if the profile is private/error."""
+    if not STEAM_API_KEY:
+        return None
+    url = "https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/"
+    params = {
+        "key": STEAM_API_KEY,
+        "steamid": steam_id,
+        "include_appinfo": False,
+        "include_played_free_games": True,
+    }
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(url, params=params) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+                games = data.get("response", {}).get("games", [])
+                return {game["appid"] for game in games}
+        except Exception:
+            return None
+
+
+async def resolve_game_name(appid):
+    """Return the game name or 'Unknown Game'."""
+    # Check local cache first
+    with sqlite3.connect(DB_FILE) as conn:
+        row = conn.execute("SELECT name FROM game_names WHERE appid = ?", (appid,)).fetchone()
+        if row:
+            return row[0]
+
+    url = f"https://store.steampowered.com/api/appdetails?appids={appid}"
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    return "Unknown Game"
+                data = await resp.json()
+                if str(appid) in data and data[str(appid)]["success"]:
+                    name = data[str(appid)]["data"]["name"]
+                    # Save in cache
+                    with sqlite3.connect(DB_FILE) as conn:
+                        conn.execute("INSERT OR IGNORE INTO game_names (appid, name) VALUES (?, ?)", (appid, name))
+                        conn.commit()
+                    return name
+        except Exception:
+            pass
+    return "Unknown Game"
+
+
+@bot.command(name="shared")
+async def shared_games(ctx):
+    """Show shared games among voice channel members with Steam IDs linked."""
+    if not ctx.author.voice or not ctx.author.voice.channel:
+        await ctx.send("You must be in a voice channel.")
+        return
+
+    channel = ctx.author.voice.channel
+    members = [m for m in channel.members if "phone" not in m.display_name.lower()]
+
+    if len(members) < 2:
+        await ctx.send("Need at least 2 players in the voice channel.")
+        return
+
+    # Get Steam IDs for members
+    with sqlite3.connect(DB_FILE) as conn:
+        steam_ids = {}
+        for member in members:
+            row = conn.execute("SELECT steam_id FROM steam_ids WHERE discord_user_id = ?", (member.id,)).fetchone()
+            if row:
+                steam_ids[member.display_name] = row[0]
+
+    if not steam_ids:
+        await ctx.send("Nobody in this channel has linked their Steam account. Use `!steam STEAMID64`.")
+        return
+
+    # Fetch owned games for each member
+    game_sets = {}
+    for name, steam_id in steam_ids.items():
+        games = await get_owned_games(steam_id)
+        if games:
+            game_sets[name] = games
+        else:
+            await ctx.send(f"⚠️ Couldn't fetch games for **{name}** (private profile or API error).")
+
+    if not game_sets:
+        await ctx.send("Couldn't fetch games from anyone.")
+        return
+
+    # Find common games
+    common = set.intersection(*game_sets.values())
+
+    if not common:
+        await ctx.send("No shared games found! 🎮")
+        return
+
+    # Resolve game names
+    await ctx.send(f"🎮 **Shared games ({len(common)}):**")
+    names = []
+    for appid in list(common)[:30]:  # Limit to 30 to avoid spam
+        name = await resolve_game_name(appid)
+        names.append(f"{name} (`{appid}`)")
+
+    if names:
+        await ctx.send("\n".join(names))
+
+    if len(common) > 30:
+        await ctx.send(f"... and {len(common) - 30} more games!")
+
+
+@bot.command(name="alwaysadd")
+async def always_add(ctx, *, name: str):
+    name = name.strip()
+    if not name:
+        await ctx.send("Please give a name.")
+        return
+    save_override(name, 'add')
+    await ctx.send(f"✅ **{name}** will now always be added to the roster.")
+
+
+@bot.command(name="alwaysremove")
+async def always_remove(ctx, *, name: str):
+    name = name.strip()
+    if not name:
+        await ctx.send("Please give a name.")
+        return
+    save_override(name, 'remove')
+    await ctx.send(f"❌ **{name}** will now always be removed from the roster.")
+
+
+@bot.command(name="clearoverride")
+async def clear_override(ctx, *, name: str):
+    name = name.strip()
+    if not name:
+        await ctx.send("Please give a name.")
+        return
+    remove_override(name)
+    await ctx.send(f"🔁 Override for **{name}** cleared.")
 
 
 @bot.command(name="commands", aliases=["help"])
@@ -442,13 +691,18 @@ async def help_cmd(ctx):
         "__Casual__\n"
         "`!drink` · `!roulette` · `!teams` · `!match` · `!round` · `!rule`\n"
         "__Tournament__\n"
-        "`!tournament` start · `!win NAME` report result · `!bracket` reprint · `!tend` cancel\n"
-        "__Roster__\n"
-        "`!roster` · `!add Name` · `!remove Name`"
+        "`!tournament` · `!bracket` · `!win NAME` · `!tend`\n"
+        "__Voice Channel__\n"
+        "`!roster` shows active players\n"
+        "__Overrides (persistent)__\n"
+        "`!alwaysadd NAME` · `!alwaysremove NAME` · `!clearoverride NAME`\n"
+        "__Steam__\n"
+        "`!steam STEAMID64` · `!unsteam` · `!shared`"
     )
 
 
 if __name__ == "__main__":
     if not TOKEN:
         raise SystemExit("Set DISCORD_TOKEN in your environment first.")
+    init_db()
     bot.run(TOKEN)
